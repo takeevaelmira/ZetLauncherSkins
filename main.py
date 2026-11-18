@@ -320,60 +320,69 @@ async def get_texture(filename: str):
 # ---------------- каталог ----------------
 
 async def external_search(query: str, page: int) -> list[dict]:
+    """
+    Парсит каталог/поиск скинов через альтернативный незащищенный источник.
+    """
     items = []
-    skindex_page = page + 1
     
-    if query:
-        url = f"https://www.minecraftskins.com/search/skin/{urllib.parse.quote(query)}/{skindex_page}/"
-    else:
-        url = f"https://www.minecraftskins.com/p/{skindex_page}/"
-
+    # Если запрос пустой, ищем популярные, если есть текст - ищем по тексту
+    # Используем публичный JSON-поиск или каталог, который не банит IP Railway
+    search_query = query if query else "boy"
+    
+    # Пример запроса к открытому поиску скинов (например, через NovaSkin / Minotar / NameMC аналоги)
+    # Воспользуемся стабильным публичным API каталога скинов:
+    url = f"https://api.mineskin.org/get/list/{page}?size=24" # Пример публичного каталога с готовыми текстурами
+    
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9"
+        "User-Agent": "ZetLauncher/2.0"
     }
 
     try:
         async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
             resp = await client.get(url, headers=headers)
-            print(f"[Parser Debug] URL: {url} | Status: {resp.status_code}") # <--- Лог статуса ответа
+            print(f"[Parser Debug] URL: {url} | Status: {resp.status_code}")
             
             if resp.status_code != 200:
+                # Запасной вариант, если первый недоступен: сгенерировать выдачу по имени запроса
+                if query:
+                    return [{
+                        "name": query,
+                        "texture_url": f"https://mineskin.eu/skin/{query}",
+                        "slim": False
+                    }]
                 return []
 
-            soup = BeautifulSoup(resp.text, "html.parser")
-            
-            # Проверим, какие блоки вообще есть на странице (выведем первые 3 карточки в лог)
-            skin_cards = soup.select("div.skin-container")
-            print(f"[Parser Debug] Найдено карточек div.skin-container: {len(skin_cards)}")
-            
-            for card in skin_cards:
-                try:
-                    title_tag = card.select_one("a.skin-title")
-                    if not title_tag:
-                        continue
-                    name = title_tag.get_text(strip=True)
-                    skin_page_link = title_tag.get("href", "")
-                    
-                    skin_id_match = re.search(r"/skin/(\d+)/", skin_page_link)
-                    if not skin_id_match:
-                        continue
-                    skin_id = skin_id_match.group(1)
-                    
-                    texture_url = f"https://www.minecraftskins.com/download/skin/{skin_id}"
-
-                    items.append({
-                        "name": name,
-                        "texture_url": texture_url,
-                        "slim": None 
-                    })
-                except Exception as ex:
-                    print(f"[Parser Loop Error]: {ex}")
+            data = resp.json()
+            # Парсим выдачу API mineskin или аналогичного сервиса
+            skins = data.get("skins", [])
+            for skin in skins:
+                name = skin.get("name", "Skin")
+                # Если был поисковый запрос, фильтруем по нему
+                if query and query.lower() not in name.lower():
                     continue
+                    
+                texture_url = skin.get("data", {}).get("texture", {}).get("url")
+                if not texture_url:
+                    continue
+                    
+                model = skin.get("data", {}).get("texture", {}).get("model", "default")
+                
+                items.append({
+                    "name": name,
+                    "texture_url": texture_url,
+                    "slim": (model == "slim")
+                })
+                
     except Exception as e:
-        print(f"[Parser Error / Timeout]: {e}")
-        
-    print(f"[Parser Debug] Итого собрано элементов: {len(items)}")
+        print(f"[Parser Error]: {e}")
+        # Если произошла ошибка, но введен ник — отдадим скин напрямую через mineskin.eu по нику
+        if query:
+            items.append({
+                "name": query,
+                "texture_url": f"https://mineskin.eu/skin/{query}",
+                "slim": False
+            })
+
     return items
 
 
