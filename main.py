@@ -17,6 +17,7 @@ import secrets
 import time
 import uuid
 from pathlib import Path
+from bs4 import BeautifulSoup
 
 import httpx
 from cryptography.hazmat.primitives import hashes, serialization
@@ -319,11 +320,68 @@ async def get_texture(filename: str):
 
 async def external_search(query: str, page: int) -> list[dict]:
     """
-    СЮДА подключается сайт-источник скинов (парсинг). Верните список словарей:
-        {"name": "Название", "texture_url": "https://.../skin.png", "slim": False}
-    Найденные скины сохраняются в каталог автоматически. Сейчас источников нет.
+    Парсит скины с сайта The Skindex (minecraftskins.com) «на лету» по поисковому запросу.
     """
-    return []
+    items = []
+    # Skindex использует нумерацию страниц с 1 для поиска
+    skindex_page = page + 1
+    
+    # Формируем URL для поиска по сайту
+    if query:
+        url = f"https://www.minecraftskins.com/search/skin/{urllib.parse.quote(query)}/{skindex_page}/"
+    else:
+        # Если запрос пустой, парсим общую ленту новых/популярных скинов
+        url = f"https://www.minecraftskins.com/p/{skindex_page}/"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+        try:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code != 200:
+                return []
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            
+            # Находим карточки скинов на странице Skindex
+            skin_cards = soup.select("div.skin-container")
+            
+            for card in skin_cards:
+                try:
+                    # Извлекаем название скина
+                    title_tag = card.select_one("a.skin-title")
+                    if not title_tag:
+                        continue
+                    name = title_tag.get_text(strip=True)
+                    skin_page_link = title_tag.get("href", "") # вида /skin/1234567/name/
+
+                    # Идентификатор/ссылка для получения самого PNG-файла текстуры
+                    # На Skindex прямую ссылку на скачивание можно собрать через id из ссылки
+                    skin_id_match = re.search(r"/skin/(\d+)/", skin_page_link)
+                    if not skin_id_match:
+                        continue
+                    skin_id = skin_id_match.group(1)
+                    
+                    # Прямая ссылка на скачивание скина (PNG) на Skindex
+                    texture_url = f"https://www.minecraftskins.com/download/skin/{skin_id}"
+
+                    # По умолчанию считаем классическим, модель slim на Skindex определяется по тегам или классам, 
+                    # но сервер лаунчера умеет сам определять slim/classic по пикселям через detect_slim(), 
+                    # поэтому можно передавать None.
+                    items.append({
+                        "name": name,
+                        "texture_url": texture_url,
+                        "slim": None 
+                    })
+                except Exception:
+                    continue
+
+        except Exception as e:
+            print(f"[Parser Error] {e}")
+
+        return items
 
 
 async def add_to_catalog(name: str, data: bytes, slim: bool | None, source: str) -> str:
