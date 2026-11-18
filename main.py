@@ -322,29 +322,29 @@ async def get_texture(filename: str):
 
 async def external_search(query: str, page: int) -> list[dict]:
     """
-    Генерирует каталог из реальных игроков через официальный Mojang API 
-    или ищет конкретный ник, введенный пользователем.
+    Загружает скины через официальный Mojang API. 
+    Если поиск пустой — загружает подборку классных игроков для каталога.
     """
     items = []
     q = query.strip()
 
-    # База крутых/популярных ников для рандомного наполнения каталога по умолчанию
-    famous_nicks = [
-        "Notch", "Dinnerbone", "Jeb_", "Grumm", "Dream", 
-        "Technoblade", "MumboJumbo", "Etho", "Stampy", "DanTDM",
-        "CaptainSparklez", "Ninja", "PewDiePie", "Corpse", "WilburSoot",
-        "Philza", "Tubbo", "Ranboo", "TommyInnit", "Sapnap"
-    ]
+    # Если поиск пустой, используем дефолтный набор популярных ников для наполнения каталога
+    if not q:
+        nicks_to_fetch = [
+            "Notch", "Dinnerbone", "Jeb_", "Grumm", "Dream", 
+            "Technoblade", "MumboJumbo", "Etho", "Stampy", "DanTDM",
+            "CaptainSparklez", "Ninja"
+        ]
+    else:
+        # Если пользователь ввел что-то в поиск, ищем конкретный ник
+        nicks_to_fetch = [q]
 
-    # Если пользователь ввел поиск, добавляем его запрос в приоритет
-    targets = [q] if q else random.sample(famous_nicks, min(12, len(famous_nicks)))
-
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        for nick in targets:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for nick in nicks_to_fetch:
             if not nick or not NICK_RE.fullmatch(nick):
                 continue
             try:
-                # 1. Запрашиваем UUID по нику у официального Mojang API
+                # 1. Получаем UUID по нику через Mojang API
                 r = await client.get(f"https://api.mojang.com/users/profiles/minecraft/{nick}")
                 if r.status_code != 200:
                     continue
@@ -352,7 +352,7 @@ async def external_search(query: str, page: int) -> list[dict]:
                 uuid_str = prof.get("id")
                 real_name = prof.get("name", nick)
 
-                # 2. Запрашиваем текстуры профиля
+                # 2. Получаем текстуры скина по UUID
                 r_prof = await client.get(f"https://sessionserver.mojang.com/session/minecraft/profile/{uuid_str}")
                 if r_prof.status_code != 200:
                     continue
@@ -368,11 +368,13 @@ async def external_search(query: str, page: int) -> list[dict]:
                     texture_url = skin_info.get("url")
                     is_slim = (skin_info.get("metadata") or {}).get("model") == "slim"
 
-                    items.append({
-                        "name": real_name,
-                        "texture_url": texture_url,
-                        "slim": is_slim
-                    })
+                    # Избегаем дубликатов
+                    if not any(i["name"].lower() == real_name.lower() for i in items):
+                        items.append({
+                            "name": real_name,
+                            "texture_url": texture_url,
+                            "slim": is_slim
+                        })
             except Exception:
                 continue
 
