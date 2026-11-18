@@ -30,6 +30,7 @@ from fastapi.responses import FileResponse, Response
 from PIL import Image
 
 DATA = Path(os.environ.get("DATA_DIR", "data"))
+MINESKIN_API_KEY = "msk_2ni2Fz9J_A4k43QIAnhvBtNiyVjNZQLmh-LhPfUMfKLGdb22Dhd87oCMji98DXXDBshJPSZI1"
 SKINS = DATA / "skins"        # PNG по хэшу содержимого: <sha256>.png
 PREVIEWS = DATA / "previews"  # картинки для карточек каталога
 for d in (DATA, SKINS, PREVIEWS):
@@ -322,69 +323,92 @@ async def get_texture(filename: str):
 
 async def external_search(query: str, page: int) -> list[dict]:
     """
-    Загружает каталог скинов из датасета Hugging Face. 
-    Если поиск пустой — выдает стартовую подборку скинов.
+    Каталог: при пустом поиске тянет список скинов через MineSkin API v2 (с ключом).
+    Поиск: ищет конкретный ник через официальный Mojang API.
     """
     items = []
-    q = query.strip().lower()
-    
-    per_page = 24
-    
-    # Если поиск пустой, делаем смещение страницей или рандомим offset, 
-    # чтобы при каждом открытии каталога до поиска были разные скины
-    if not q:
-        # Для разнообразия при пустом поиске можем взять случайный офсет от 0 до 5000
-        offset = page * per_page if page > 0 else random.randint(0, 200)
-    else:
-        offset = page * per_page
+    q = query.strip()
 
-    url = f"https://datasets-server.huggingface.co/rows?dataset=neurlang/Minecraft-Skins-Captioned-1M&config=default&split=train&offset={offset}&limit={per_page}"
-    
-    headers = {
-        "User-Agent": "ZetLauncher/2.0"
-    }
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        
+        # СЛУЧАЙ 1: Пустой поиск — загружаем каталог через MineSkin API v2
+        if not q:
+            url = f"https://api.mineskin.org/v2/skins?page={page + 1}&size=24"
+            headers = {
+                "User-Agent": "ZetLauncher/2.0",
+                "Authorization": f"Bearer {MINESKIN_API_KEY}" # Передаем ваш API-ключ
+            }
+            
+            try:
+                resp = await client.get(url, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    skins = data.get("skins", data.get("items", []))
+                    if isinstance(data, list):
+                        skins = data
 
-    try:
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-            resp = await client.get(url, headers=headers)
-            if resp.status_code != 200:
-                return []
+                    for skin in skins:
+                        name = skin.get("name", "Skin")
+                        
+                        # Достаем текстуру из структуры ответа MineSkin v2
+                        data_obj = skin.get("data", skin)
+                        texture_info = data_obj.get("texture", {})
+                        texture_url = texture_info.get("url") or skin.get("textureUrl")
+                        
+                        if not texture_url:
+                            skin_id = skin.get("uuid") or skin.get("id")
+                            if skin_id:
+                                texture_url = f"https://textures.minecraft.net/texture/{skin_id}"
+                            else:
+                                continue
 
-            data = resp.json()
-            rows = data.get("rows", [])
+                        model = texture_info.get("model", skin.get("model", "default"))
 
-            for row in rows:
-                row_data = row.get("row", {})
+                        items.append({
+                            "name": name,
+                            "texture_url": texture_url,
+                            "slim": (model == "slim")
+                        })
+            except Exception as e:
+                print(f"[MineSkin Catalog Error]: {e}")
                 
-                description = row_data.get("description", "") or row_data.get("text", "")
-                file_name = row_data.get("file_name", "Skin")
-                
-                # Если пользователь ввёл текст в поиск, фильтруем по нему
-                if q and q not in description.lower() and q not in file_name.lower():
-                    continue
+        # СЛУЧАЙ 2: Пользователь ввел ник — ищем через Mojang API
+        else:
+            try:
+                # 1. Запрос UUID по нику
+                r = await client.get(f"https://api.mojang.com/users/profiles/minecraft/{q}")
+                if r.status_code == 200:
+                    prof = r.json()
+                    uuid_str = prof.get("id")
+                    real_name = prof.get("name", q)
 
-                image_info = row_data.get("image", {})
-                texture_url = image_info.get("url") if isinstance(image_info, dict) else None
-                
-                if not texture_url:
-                    hash_val = row_data.get("hash")
-                    if hash_val:
-                        texture_url = f"https://huggingface.co/datasets/neurlang/Minecraft-Skins-Captioned-1M/resolve/main/{hash_val}.png"
-                    else:
-                        continue
+                    # 2. Запрос текстур профиля по UUID
+                    r_prof = await client.get(f"https://sessionserver.mojang.com/session/minecraft/profile/{uuid_str}")
+                    if r_prof.status_code == 200:
+                        for p in r_prof.json().get("properties", []):
+                            if p.get("name") != "textures":
+                                continue
+                            tex_data = json.loads(base64.b64decode(p.get("value", "")))
+                            skin_info = tex_data.get("textures", {}).get("SKIN")
+                            if skin_info:
+                                texture_url = skin_info.get("url")
+                                is_slim = (skin_info.get("metadata") or {}).get("model") == "slim"
 
-                name = file_name.replace(".png", "").capitalize()
-                if len(name) > 25 or not name.isalnum():
-                    name = f"Skin #{row.get('row_idx', 0)}"
+                                items.append({
+                                    "name": real_name,
+                                    "texture_url": texture_url,
+                                    "slim": is_slim
+                                })
+            except Exception as e:
+                print(f"[Mojang Search Error]: {e}")
 
+            # Если через Mojang ник не найден, отдадим фоллбэк на mineskin.eu по имени
+            if not items:
                 items.append({
-                    "name": name,
-                    "texture_url": texture_url,
-                    "slim": "slim" in description.lower()
+                    "name": q.capitalize(),
+                    "texture_url": f"https://mineskin.eu/skin/{q}",
+                    "slim": False
                 })
-
-    except Exception as e:
-        print(f"[HF Dataset Parser Error]: {e}")
 
     return items
 
