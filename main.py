@@ -329,18 +329,23 @@ async def external_search(query: str, page: int) -> list[dict]:
         url = f"https://www.minecraftskins.com/p/{skindex_page}/"
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
     }
 
-    # Увеличиваем тайм-аут до 15 секунд и перехватываем все сетевые ошибки/таймауты
     try:
         async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
             resp = await client.get(url, headers=headers)
+            print(f"[Parser Debug] URL: {url} | Status: {resp.status_code}") # <--- Лог статуса ответа
+            
             if resp.status_code != 200:
                 return []
 
             soup = BeautifulSoup(resp.text, "html.parser")
+            
+            # Проверим, какие блоки вообще есть на странице (выведем первые 3 карточки в лог)
             skin_cards = soup.select("div.skin-container")
+            print(f"[Parser Debug] Найдено карточек div.skin-container: {len(skin_cards)}")
             
             for card in skin_cards:
                 try:
@@ -362,11 +367,13 @@ async def external_search(query: str, page: int) -> list[dict]:
                         "texture_url": texture_url,
                         "slim": None 
                     })
-                except Exception:
+                except Exception as ex:
+                    print(f"[Parser Loop Error]: {ex}")
                     continue
     except Exception as e:
         print(f"[Parser Error / Timeout]: {e}")
         
+    print(f"[Parser Debug] Итого собрано элементов: {len(items)}")
     return items
 
 
