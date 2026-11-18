@@ -322,61 +322,69 @@ async def get_texture(filename: str):
 
 async def external_search(query: str, page: int) -> list[dict]:
     """
-    Загружает скины через официальный Mojang API. 
-    Если поиск пустой — загружает подборку классных игроков для каталога.
+    Загружает каталог скинов из датасета Hugging Face. 
+    Если поиск пустой — выдает стартовую подборку скинов.
     """
     items = []
-    q = query.strip()
-
-    # Если поиск пустой, используем дефолтный набор популярных ников для наполнения каталога
+    q = query.strip().lower()
+    
+    per_page = 24
+    
+    # Если поиск пустой, делаем смещение страницей или рандомим offset, 
+    # чтобы при каждом открытии каталога до поиска были разные скины
     if not q:
-        nicks_to_fetch = [
-            "Notch", "Dinnerbone", "Jeb_", "Grumm", "Dream", 
-            "Technoblade", "MumboJumbo", "Etho", "Stampy", "DanTDM",
-            "CaptainSparklez", "Ninja"
-        ]
+        # Для разнообразия при пустом поиске можем взять случайный офсет от 0 до 5000
+        offset = page * per_page if page > 0 else random.randint(0, 200)
     else:
-        # Если пользователь ввел что-то в поиск, ищем конкретный ник
-        nicks_to_fetch = [q]
+        offset = page * per_page
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        for nick in nicks_to_fetch:
-            if not nick or not NICK_RE.fullmatch(nick):
-                continue
-            try:
-                # 1. Получаем UUID по нику через Mojang API
-                r = await client.get(f"https://api.mojang.com/users/profiles/minecraft/{nick}")
-                if r.status_code != 200:
-                    continue
-                prof = r.json()
-                uuid_str = prof.get("id")
-                real_name = prof.get("name", nick)
+    url = f"https://datasets-server.huggingface.co/rows?dataset=neurlang/Minecraft-Skins-Captioned-1M&config=default&split=train&offset={offset}&limit={per_page}"
+    
+    headers = {
+        "User-Agent": "ZetLauncher/2.0"
+    }
 
-                # 2. Получаем текстуры скина по UUID
-                r_prof = await client.get(f"https://sessionserver.mojang.com/session/minecraft/profile/{uuid_str}")
-                if r_prof.status_code != 200:
-                    continue
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code != 200:
+                return []
+
+            data = resp.json()
+            rows = data.get("rows", [])
+
+            for row in rows:
+                row_data = row.get("row", {})
                 
-                for p in r_prof.json().get("properties", []):
-                    if p.get("name") != "textures":
-                        continue
-                    tex_data = json.loads(base64.b64decode(p.get("value", "")))
-                    skin_info = tex_data.get("textures", {}).get("SKIN")
-                    if not skin_info:
-                        continue
-                    
-                    texture_url = skin_info.get("url")
-                    is_slim = (skin_info.get("metadata") or {}).get("model") == "slim"
+                description = row_data.get("description", "") or row_data.get("text", "")
+                file_name = row_data.get("file_name", "Skin")
+                
+                # Если пользователь ввёл текст в поиск, фильтруем по нему
+                if q and q not in description.lower() and q not in file_name.lower():
+                    continue
 
-                    # Избегаем дубликатов
-                    if not any(i["name"].lower() == real_name.lower() for i in items):
-                        items.append({
-                            "name": real_name,
-                            "texture_url": texture_url,
-                            "slim": is_slim
-                        })
-            except Exception:
-                continue
+                image_info = row_data.get("image", {})
+                texture_url = image_info.get("url") if isinstance(image_info, dict) else None
+                
+                if not texture_url:
+                    hash_val = row_data.get("hash")
+                    if hash_val:
+                        texture_url = f"https://huggingface.co/datasets/neurlang/Minecraft-Skins-Captioned-1M/resolve/main/{hash_val}.png"
+                    else:
+                        continue
+
+                name = file_name.replace(".png", "").capitalize()
+                if len(name) > 25 or not name.isalnum():
+                    name = f"Skin #{row.get('row_idx', 0)}"
+
+                items.append({
+                    "name": name,
+                    "texture_url": texture_url,
+                    "slim": "slim" in description.lower()
+                })
+
+    except Exception as e:
+        print(f"[HF Dataset Parser Error]: {e}")
 
     return items
 
