@@ -319,57 +319,43 @@ async def get_texture(filename: str):
 # ---------------- каталог ----------------
 
 async def external_search(query: str, page: int) -> list[dict]:
-    """
-    Парсит скины с сайта The Skindex (minecraftskins.com) «на лету» по поисковому запросу.
-    """
     items = []
-    # Skindex использует нумерацию страниц с 1 для поиска
     skindex_page = page + 1
     
-    # Формируем URL для поиска по сайту
     if query:
         url = f"https://www.minecraftskins.com/search/skin/{urllib.parse.quote(query)}/{skindex_page}/"
     else:
-        # Если запрос пустой, парсим общую ленту новых/популярных скинов
         url = f"https://www.minecraftskins.com/p/{skindex_page}/"
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
-    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-        try:
+    # Увеличиваем тайм-аут до 15 секунд и перехватываем все сетевые ошибки/таймауты
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code != 200:
                 return []
 
             soup = BeautifulSoup(resp.text, "html.parser")
-            
-            # Находим карточки скинов на странице Skindex
             skin_cards = soup.select("div.skin-container")
             
             for card in skin_cards:
                 try:
-                    # Извлекаем название скина
                     title_tag = card.select_one("a.skin-title")
                     if not title_tag:
                         continue
                     name = title_tag.get_text(strip=True)
-                    skin_page_link = title_tag.get("href", "") # вида /skin/1234567/name/
-
-                    # Идентификатор/ссылка для получения самого PNG-файла текстуры
-                    # На Skindex прямую ссылку на скачивание можно собрать через id из ссылки
+                    skin_page_link = title_tag.get("href", "")
+                    
                     skin_id_match = re.search(r"/skin/(\d+)/", skin_page_link)
                     if not skin_id_match:
                         continue
                     skin_id = skin_id_match.group(1)
                     
-                    # Прямая ссылка на скачивание скина (PNG) на Skindex
                     texture_url = f"https://www.minecraftskins.com/download/skin/{skin_id}"
 
-                    # По умолчанию считаем классическим, модель slim на Skindex определяется по тегам или классам, 
-                    # но сервер лаунчера умеет сам определять slim/classic по пикселям через detect_slim(), 
-                    # поэтому можно передавать None.
                     items.append({
                         "name": name,
                         "texture_url": texture_url,
@@ -377,11 +363,10 @@ async def external_search(query: str, page: int) -> list[dict]:
                     })
                 except Exception:
                     continue
-
-        except Exception as e:
-            print(f"[Parser Error] {e}")
-
-        return items
+    except Exception as e:
+        print(f"[Parser Error / Timeout]: {e}")
+        
+    return items
 
 
 async def add_to_catalog(name: str, data: bytes, slim: bool | None, source: str) -> str:
@@ -429,15 +414,20 @@ async def catalog(request: Request, q: str = "", page: int = 0, per: int = 24):
 
     if page == 0 and q:
         try:
-            if NICK_RE.fullmatch(q) and not any(c["name"].lower() == q.lower() for c in CATALOG.values()):
-                await mojang_lookup(q)
-            for it in await external_search(q, 0):
+            # 1. Сначала пробуем спарсить сайт-источник по запросу
+            external_items = await external_search(q, 0)
+            for it in external_items:
                 async with httpx.AsyncClient(timeout=10) as c:
                     png = await c.get(it["texture_url"])
                 if png.status_code == 200:
                     await add_to_catalog(it["name"], png.content, it.get("slim"), "external")
-        except Exception:
-            pass  # источник недоступен: показываем то, что уже есть
+            
+            # 2. Если парсер ничего не нашел И это похоже на ник — только тогда идем в Mojang как запасной вариант
+            if not external_items and NICK_RE.fullmatch(q) and not any(c["name"].lower() == q.lower() for c in CATALOG.values()):
+                await mojang_lookup(q)
+                
+        except Exception as e:
+            print(f"[Catalog Error]: {e}")
 
     items = sorted(CATALOG.values(), key=lambda c: c["added"], reverse=True)
     if q:
