@@ -19,6 +19,7 @@ import uuid
 import urllib.parse
 from pathlib import Path
 from bs4 import BeautifulSoup
+import random
 
 import httpx
 from cryptography.hazmat.primitives import hashes, serialization
@@ -321,67 +322,59 @@ async def get_texture(filename: str):
 
 async def external_search(query: str, page: int) -> list[dict]:
     """
-    Парсит каталог/поиск скинов через альтернативный незащищенный источник.
+    Генерирует каталог из реальных игроков через официальный Mojang API 
+    или ищет конкретный ник, введенный пользователем.
     """
     items = []
-    
-    # Если запрос пустой, ищем популярные, если есть текст - ищем по тексту
-    # Используем публичный JSON-поиск или каталог, который не банит IP Railway
-    search_query = query if query else "boy"
-    
-    # Пример запроса к открытому поиску скинов (например, через NovaSkin / Minotar / NameMC аналоги)
-    # Воспользуемся стабильным публичным API каталога скинов:
-    url = f"https://api.mineskin.org/get/list/{page}?size=24" # Пример публичного каталога с готовыми текстурами
-    
-    headers = {
-        "User-Agent": "ZetLauncher/2.0"
-    }
+    q = query.strip()
 
-    try:
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-            resp = await client.get(url, headers=headers)
-            print(f"[Parser Debug] URL: {url} | Status: {resp.status_code}")
-            
-            if resp.status_code != 200:
-                # Запасной вариант, если первый недоступен: сгенерировать выдачу по имени запроса
-                if query:
-                    return [{
-                        "name": query,
-                        "texture_url": f"https://mineskin.eu/skin/{query}",
-                        "slim": False
-                    }]
-                return []
+    # База крутых/популярных ников для рандомного наполнения каталога по умолчанию
+    famous_nicks = [
+        "Notch", "Dinnerbone", "Jeb_", "Grumm", "Dream", 
+        "Technoblade", "MumboJumbo", "Etho", "Stampy", "DanTDM",
+        "CaptainSparklez", "Ninja", "PewDiePie", "Corpse", "WilburSoot",
+        "Philza", "Tubbo", "Ranboo", "TommyInnit", "Sapnap"
+    ]
 
-            data = resp.json()
-            # Парсим выдачу API mineskin или аналогичного сервиса
-            skins = data.get("skins", [])
-            for skin in skins:
-                name = skin.get("name", "Skin")
-                # Если был поисковый запрос, фильтруем по нему
-                if query and query.lower() not in name.lower():
+    # Если пользователь ввел поиск, добавляем его запрос в приоритет
+    targets = [q] if q else random.sample(famous_nicks, min(12, len(famous_nicks)))
+
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        for nick in targets:
+            if not nick or not NICK_RE.fullmatch(nick):
+                continue
+            try:
+                # 1. Запрашиваем UUID по нику у официального Mojang API
+                r = await client.get(f"https://api.mojang.com/users/profiles/minecraft/{nick}")
+                if r.status_code != 200:
                     continue
-                    
-                texture_url = skin.get("data", {}).get("texture", {}).get("url")
-                if not texture_url:
+                prof = r.json()
+                uuid_str = prof.get("id")
+                real_name = prof.get("name", nick)
+
+                # 2. Запрашиваем текстуры профиля
+                r_prof = await client.get(f"https://sessionserver.mojang.com/session/minecraft/profile/{uuid_str}")
+                if r_prof.status_code != 200:
                     continue
+                
+                for p in r_prof.json().get("properties", []):
+                    if p.get("name") != "textures":
+                        continue
+                    tex_data = json.loads(base64.b64decode(p.get("value", "")))
+                    skin_info = tex_data.get("textures", {}).get("SKIN")
+                    if not skin_info:
+                        continue
                     
-                model = skin.get("data", {}).get("texture", {}).get("model", "default")
-                
-                items.append({
-                    "name": name,
-                    "texture_url": texture_url,
-                    "slim": (model == "slim")
-                })
-                
-    except Exception as e:
-        print(f"[Parser Error]: {e}")
-        # Если произошла ошибка, но введен ник — отдадим скин напрямую через mineskin.eu по нику
-        if query:
-            items.append({
-                "name": query,
-                "texture_url": f"https://mineskin.eu/skin/{query}",
-                "slim": False
-            })
+                    texture_url = skin_info.get("url")
+                    is_slim = (skin_info.get("metadata") or {}).get("model") == "slim"
+
+                    items.append({
+                        "name": real_name,
+                        "texture_url": texture_url,
+                        "slim": is_slim
+                    })
+            except Exception:
+                continue
 
     return items
 
